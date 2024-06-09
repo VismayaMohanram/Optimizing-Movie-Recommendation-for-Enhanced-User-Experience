@@ -1,0 +1,284 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+film_data <- read.csv(file="movie.csv")
+evaluation <- read.csv(file="rating.csv", nrows=400000)
+label <- read.csv("tag.csv")
+dim(evaluation)
+
+```
+```{r}
+initial_film_size <- length(unique(evaluation$movieId))
+film_category <- evaluation %>% group_by(movieId) %>% summarize(count = n_distinct(userId))
+film_category <- film_category[film_category$count > 0.01 * nrow(film_category),]
+print(paste0("Number of movies reduced from ", initial_film_size, " to ", nrow(film_category)))
+
+evaluation <- evaluation[evaluation$movieId %in% film_category$movieId,]
+dim(evaluation)
+
+```
+```{r}
+evaluation_matrix <- evaluation[, 1:3] %>% pivot_wider(names_from = movieId, values_from = rating)
+evaluation_matrix[is.na(evaluation_matrix)] <- 0
+user_identifiers <- evaluation_matrix[, 1]
+evaluation_matrix <- as.matrix(evaluation_matrix[, 2:ncol(evaluation_matrix)])
+print(paste0("Number of users: ", dim(evaluation_matrix)[1]))
+film_columns <- colnames(evaluation_matrix)
+
+```
+```{r}
+calculate_mae <- function(predictions, observed_matrix, zero_matrix, num_elements) {
+  mean_absolute_error <- sum(abs((predictions - observed_matrix) * zero_matrix)) / num_elements
+  return(mean_absolute_error)
+}
+
+calculate_mce <- function(predictions, observed_matrix, zero_matrix, num_elements) {
+  values <- abs((predictions - observed_matrix) * zero_matrix)
+  values <- (1 + values)^3
+  mean_cubed_error <- sum(values) / num_elements
+  return(mean_cubed_error)
+}
+
+```
+
+
+```{r}
+matrix_factorization <- function(original_matrix, user_matrix, item_matrix, num_features, test_matrix = NULL, epochs = 20, alpha = 0.01, beta = 0.01, verbose = FALSE) {
+  item_matrix <- t(item_matrix)
+  mae_values <- c()
+  mce_values <- c()
+  for (epoch in seq(1:epochs)) {
+    for (i in seq(1:nrow(original_matrix))) {
+      for (j in seq(1:ncol(original_matrix))) {
+        if ((original_matrix[i, j] > 0)) {
+          error_cell <- original_matrix[i, j] - (user_matrix[i,] %*% item_matrix[, j])
+          user_matrix[i,] <- user_matrix[i,] + alpha * (2 * as.vector(error_cell) * item_matrix[, j] - beta * user_matrix[i,])
+          item_matrix[, j] <- item_matrix[, j] + alpha * (2 * as.vector(error_cell) * user_matrix[i,] - beta * item_matrix[, j])
+        }
+      }
+    }
+    predicted_matrix <- user_matrix %*% item_matrix
+    if (!is.null(test_matrix)) {
+      mae_value <- calculate_mae(predicted_matrix, test_matrix, zero_matrix, num_elements)
+      mce_value <- calculate_mce(predicted_matrix, test_matrix, zero_matrix, num_elements)
+      
+      if (verbose == TRUE) {
+        print(paste0("Epoch ", epoch, " MAE:", mae_value, " MCE:", mce_value))
+      }
+      
+      mae_values <- c(mae_values, mae_value)
+      mce_values <- c(mce_values, mce_value)
+    }
+    if (is.null(test_matrix)) {
+      print(paste0("Epoch: ", epoch))
+    }
+  }
+  output_matrix <- user_matrix %*% item_matrix
+  return(list("output_matrix" = output_matrix, "mae_values" = mae_values, "mce_values" = mce_values))
+}
+
+```
+
+
+
+```{r}
+training_matrix <- copy(evaluation_matrix)
+testing_matrix <- matrix(0, nrow(training_matrix), ncol(training_matrix))
+colnames(testing_matrix) <- colnames(training_matrix)
+num_elements = 0
+
+# create a zero-one matrix for faster MAE/MCE calculations
+zero_matrix <- matrix(0, nrow = nrow(testing_matrix), ncol = ncol(testing_matrix))
+
+flag = TRUE
+for (i in seq(1:nrow(training_matrix))) {
+  flag = FALSE
+  for (j in seq(1:ncol(training_matrix))) {
+    # if flag = true, then assign with 0.1 probability to test matrix
+    if (training_matrix[i, j] != 0) {
+      if (flag == TRUE) { # may not be needed as only users with at least one rating are present
+        if (runif(1, 0, 1) > 0.8) {
+          testing_matrix[i, j] = training_matrix[i, j]
+          training_matrix[i, j] = 0
+          num_elements = num_elements + 1
+          zero_matrix[i, j] = 1
+        }
+      }
+      # set flag = True when at least 1 rating > 0 for a user
+      flag = TRUE
+    }
+  }
+}
+training_matrix <- as.matrix(training_matrix)
+testing_matrix <- as.matrix(testing_matrix)
+print(dim(training_matrix))
+print(dim(testing_matrix))
+
+```
+```{r}
+num_rows <- dim(training_matrix)[1]
+num_cols <- dim(training_matrix)[2]
+num_features <- 20
+
+set.seed(100)
+
+user_matrix <- matrix(runif(num_rows * num_features), nrow = num_rows)
+item_matrix <- matrix(runif(num_cols * num_features), nrow = num_cols)
+print(dim(user_matrix))
+print(dim(item_matrix))
+
+```
+```{r}
+start_time <- Sys.time()
+print(paste("MAE:", calculate_mae(user_matrix %*% t(item_matrix), training_matrix, zero_matrix, num_elements), " MCE:", calculate_mce(user_matrix %*% t(item_matrix), training_matrix, zero_matrix, num_elements)))
+output_result <- matrix_factorization(training_matrix, user_matrix, item_matrix, num_features, testing_matrix, epochs = 50, alpha = 0.01, beta = 0.1, verbose = TRUE)
+end_time <- Sys.time()
+print(paste0("Time Taken: ", end_time - start_time))
+
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(data = data.frame(Epochs = seq(1, 50), MAE = output_result$mae_values), aes(x = Epochs, y = MAE)) +
+  geom_line(col = "steelblue", size = 1.5) +
+  labs(title = "MAE Plot") +
+  theme(axis.text.x = element_text(size = 15), axis.text.y = element_text(size = 15), axis.title = element_text(size = 15))
+
+```
+```{r}
+mce_data <- data.frame(Epochs = seq(1, 50), MCE = output_result$mce_values)
+colnames(mce_data) <- c("Epochs", "MCE")
+
+ggplot(data = mce_data, aes(x = Epochs, y = MCE)) +
+  geom_line(col = "seagreen", size = 1.5) +
+  theme(axis.text.x = element_text(size = 15), axis.text.y = element_text(size = 15), axis.title = element_text(size = 15))
+
+```
+
+```{r}
+start_time <- Sys.time()
+output_result2 <- matrix_factorization(evaluation_matrix, user_matrix, item_matrix, num_features, test_matrix = NULL, epochs = 15, alpha = 0.01, beta = 0.1, verbose = TRUE)
+end_time <- Sys.time()
+print(paste0("Time Taken: ", end_time - start_time))
+
+```
+```{r}
+mae_value <- calculate_mae(output_result2$output_matrix, evaluation_matrix, zero_matrix, num_elements)
+mce_value <- calculate_mce(output_result2$output_matrix, evaluation_matrix, zero_matrix, num_elements)
+print(c(mae_value, mce_value))
+
+```
+
+
+
+```{r}
+get_recommendations <- function(user_identifier, output_result, num_rec_movies = 5, num_watched_movies = 5) {
+  user_pivot <- data.frame(evaluation_matrix[user_identifier, ])
+  colnames(user_pivot) <- "rating"
+  user_pivot$movieId <- rownames(user_pivot)
+
+  R <- output_result$output_matrix[user_identifier, ]
+
+  R <- data.frame(R)
+  colnames(R) <- "rating"
+  R$movieId <- rownames(user_pivot)
+  R <- R[order(-R$rating), ]
+  dim(R)
+  dim(user_pivot)
+
+  # Remove movies already watched
+  user_movie_watched <- user_pivot[user_pivot$rating != 0, ]
+  R <- R[!(R$movieId %in% user_movie_watched[, 2]), ]
+  R <- R[1:num_rec_movies, ]
+  R[R$rating > 5, 1] = 5
+  R[R$rating < 0, 1] = 0
+
+  rownames(user_movie_watched) <- seq(1:nrow(user_movie_watched))
+
+  user_movie_watched <- merge(user_movie_watched, film_data, by = "movieId", all.x = TRUE)
+  user_movie_watched <- user_movie_watched[order(-user_movie_watched$rating), ]
+  print("######## Matrix Factorization recommendation ########")
+  print("######## Movies watched by user ########")
+  print(head(user_movie_watched, num_watched_movies))
+  write.csv(head(user_movie_watched, num_watched_movies), "sample2_watched.csv")
+
+  user_movie_rec <- merge(R, film_data, by = "movieId")
+  user_movie_rec$rating <- round(user_movie_rec$rating, 2)
+  print("######## Movies Recommended to user ########")
+  print(user_movie_rec)
+  return(user_movie_rec)
+}
+
+```
+
+```{r}
+calculate_cosine_similarity <- function(vector_B, vector_A) {
+  return(cosine(vector_A, vector_B))
+}
+
+```
+
+
+```{r}
+get_cosine_recommendations <- function(user_identifier, user_ratings, num_rec_movies = 5) {
+  user_list <- data.frame(matrix(nrow = 0, ncol = 2))
+  user_ratings_copy <- copy(as.matrix(user_ratings))
+  A <- user_ratings_copy[user_identifier, ]  # user 1
+  user_ratings_copy <- data.frame(user_ratings_copy)
+  out <- apply(as.matrix(user_ratings_copy[-user_identifier, ]), 1, calculate_cosine_similarity, vector_A = A)
+  out2 <- sort(out, decreasing = TRUE)[1:5]
+  top_user_index <- as.numeric(names(out2[1]))
+
+  df1 <- user_ratings_copy[top_user_index, ]  # all the movies of the user
+  df1 <- data.frame(df1)
+  df1 <- t(df1)
+  df1 <- as.data.frame(df1)
+  colnames(df1) <- "rating"
+  df1$movieId <- as.vector(colnames(user_ratings))
+
+  user_pivot <- data.frame(user_ratings[user_identifier, ])
+  colnames(user_pivot) <- "rating"
+  user_pivot$movieId <- rownames(user_pivot)
+  user_movie_watched <- user_pivot[user_pivot$rating != 0, ]
+  df1 <- df1[!(df1$movieId %in% user_movie_watched[, 2]), ]
+  df1 <- df1[df1$rating > 2, ]
+
+  df1 <- df1[order(-df1$rating), ]
+
+  top_movies <- df1[1:num_rec_movies, ]
+  df2 <- merge(top_movies, film_data, by = "movieId")
+  return(df2)
+}
+
+```
+
+
+
+```{r}
+num_movies <- 30
+user_identifier <- 243
+cosine_recommendations <- get_cosine_recommendations(user_identifier, evaluation_matrix, num_movies)
+matrix_factorization_recommendations <- get_recommendations(user_identifier, output_result2, 30, 30)
+
+write.csv(matrix_factorization_recommendations, "matrix_factorization_recommendations.csv")
+write.csv(cosine_recommendations, "cosine_recommendations.csv")
+
+```
+```{r}
+print("Cosine recommendations")
+print(cosine_recommendations)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
